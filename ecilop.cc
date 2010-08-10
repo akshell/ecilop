@@ -74,6 +74,35 @@ void FailOnAssertion(const string& file,
      ? static_cast<void>(0)                                             \
      : FailOnAssertion(__FILE__, __LINE__, __PRETTY_FUNCTION__, #cond))
 
+
+void Reply(char op, int conn_fd, const string& object)
+{
+    string reply;
+    if (op == 'E') {
+        reply = 'E' + object + " not found";
+    } else {
+        string content("<h2>" + object + " not found</h2>");
+        ostringstream oss;
+        oss << ("HTTP/1.0 404 Not found\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: ")
+            << content.size() << "\r\n\r\n" << content;
+        reply = oss.str();
+    }
+    size_t sent = 0;
+    ssize_t count;
+    do {
+        count = write(conn_fd, reply.data() + sent, reply.size() - sent);
+        sent += count;
+    } while (count > 0 && sent < reply.size());
+    shutdown(conn_fd, SHUT_WR);
+    char buf[BUF_SIZE];
+    do {
+        count = read(conn_fd, buf, BUF_SIZE);
+    } while (count > 0);
+    exit(1);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Host
 ////////////////////////////////////////////////////////////////////////////////
@@ -82,17 +111,17 @@ class Host : boost::noncopyable {
 public:
     static Host* GetLastPtr();
 
-    Host(const string& domain,
-         const string& app,
+    Host(const string& id,
          const string& dev,
-         const string& ws,
+         const string& app,
          const string& env,
          char op,
          int conn_fd);
 
     ~Host();
 
-    string GetDomain() const;
+    string GetId() const;
+    vector<string>& GetDomains();
     time_t GetTime() const;
     void Run(char op, int conn_fd);
 
@@ -100,13 +129,13 @@ private:
     static Host* first_ptr;
     static Host* last_ptr;
 
-    string domain_, app_, dev_, ws_, env_;
+    string id_, dev_, app_, env_;
+    vector<string> domains_;
     int carrier_fd_;
     time_t time_;
     Host* next_ptr_;
     Host* prev_ptr_;
 
-    static void Reply(int conn_fd, const string& object);
     bool Send(char op, int conn_fd) const;
     void Launch(char op, int conn_fd);
 
@@ -123,17 +152,15 @@ Host* Host::GetLastPtr()
 }
 
 
-Host::Host(const string& domain,
-           const string& app,
+Host::Host(const string& id,
            const string& dev,
-           const string& ws,
+           const string& app,
            const string& env,
            char op,
            int conn_fd)
-    : domain_(domain)
-    , app_(app)
+    : id_(id)
     , dev_(dev)
-    , ws_(ws)
+    , app_(app)
     , env_(env)
     , next_ptr_(0)
 {
@@ -158,9 +185,15 @@ Host::~Host()
 }
 
 
-string Host::GetDomain() const
+string Host::GetId() const
 {
-    return domain_;
+    return id_;
+}
+
+
+vector<string>& Host::GetDomains()
+{
+    return domains_;
 }
 
 
@@ -185,30 +218,6 @@ void Host::Run(char op, int conn_fd)
         prev_ptr_ = first_ptr;
         first_ptr = this;
     }
-}
-
-
-void Host::Reply(int conn_fd, const string& object)
-{
-    string content("<h2>" + object + " not found</h2>");
-    ostringstream oss;
-    oss << ("HTTP/1.0 404 Not found\r\n"
-            "Content-Type: text/html\r\n"
-            "Content-Length: ")
-        << content.size() << "\r\n\r\n" << content;
-    string reply(oss.str());
-    size_t sent = 0;
-    ssize_t count;
-    do {
-        count = write(conn_fd, reply.data() + sent, reply.size() - sent);
-        sent += count;
-    } while (count > 0 && sent < reply.size());
-    shutdown(conn_fd, SHUT_WR);
-    char buf[BUF_SIZE];
-    do {
-        count = read(conn_fd, buf, BUF_SIZE);
-    } while (count > 0);
-    exit(1);
 }
 
 
@@ -246,57 +255,44 @@ void Host::Launch(char op, int conn_fd)
         close(fd_pair[1]);
         return;
     }
-    string host_path(
-        data_path +
-        (app_.empty() ? "/devs/" + dev_ + '/' + ws_ : "/apps/" + app_));
-    string lock_path(locks_path + '/' + domain_);
+    string lock_path(locks_path + '/' + id_);
     int lock_fd = open(lock_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
     ASSERT(lock_fd != -1);
     ret = flock(lock_fd, LOCK_SH);
     ASSERT(ret == 0);
+    string host_path(data_path + "/devs/" + dev_ + "/apps/" + app_);
+    string check_path(env_.empty() ? host_path : host_path + "/envs/" + env_);
     struct stat st;
-    string media_path(
-        host_path + (app_.empty() ? "/envs/" + env_ : "/media"));
-    if (stat(media_path.c_str(), &st)) {
+    if (stat(check_path.c_str(), &st)) {
         ret = unlink(lock_path.c_str());
         ASSERT(ret == 0);
-        if (!app_.empty())
-            Reply(conn_fd, "Application " + app_);
         string dev_path(data_path + "/devs/" + dev_);
         if (stat(dev_path.c_str(), &st))
-            Reply(conn_fd, "Developer " + dev_);
-        string ws_path(dev_path + '/' + ws_);
-        if (stat(ws_path.c_str(), &st))
-            Reply(conn_fd, "Workspace " + ws_);
+            Reply(op, conn_fd, "Developer " + dev_);
+        if (env_.empty() || stat(host_path.c_str(), &st))
+            Reply(op, conn_fd, "App " + app_ + ' ' + env_);
         else
-            Reply(conn_fd, "Environment " + env_);
+            Reply(op, conn_fd, "Environment " + env_);
     }
     Send(op, conn_fd);
-    string code_path(host_path + "/code");
-    string schema_name(
-        ':' + (app_.empty() ? dev_ + ':' + ws_ + ':' + env_ : app_));
-    string tablespace_name(dev_);
-    if (tablespace_name.empty()) {
-        char buf[MAX_NAME_SIZE];
-        int admin_fd = open(
-            (host_path + "/admin").c_str(), O_RDONLY | O_CLOEXEC);
-        ASSERT(admin_fd != -1);
-        ssize_t size = read(admin_fd, buf, MAX_NAME_SIZE);
-        ASSERT(size != -1);
-        tablespace_name.assign(buf, size);
-    }
     int dup_fd = dup2(fd_pair[1], STDIN_FILENO);
     ASSERT(dup_fd == STDIN_FILENO);
+    string code_path(host_path + "/code");
     const char* args[] = {
         patsak_path.c_str(), "work",
         "--app", code_path.c_str(),
-        "--media", media_path.c_str(),
-        "--schema", schema_name.c_str(),
-        "--tablespace", tablespace_name.c_str(),
-        0, 0, 0};
+        "--schema", id_.c_str(),
+        "--tablespace", dev_.c_str(),
+        0, 0, 0, 0, 0};
+    size_t i = 8;
+    string repo_name(dev_ + '/' + app_);
+    if (env_.empty()) {
+        args[i++] = "--repo";
+        args[i++] = repo_name.c_str();
+    }
     if (!patsak_config_path.empty()) {
-        args[10] = "--config";
-        args[11] = patsak_config_path.c_str();
+        args[i++] = "--config";
+        args[i] = patsak_config_path.c_str();
     }
     execv(patsak_path.c_str(), const_cast<char**>(args));
     Fail("Failed to launch patsak");
@@ -325,6 +321,34 @@ void RequireOption(const string& name, const string& value)
 void HandleStop(int /*signal*/)
 {
     exit(0);
+}
+
+
+string ParseId(const char* start_ptr) {
+    const char* end_ptr = ++start_ptr;
+    while (*end_ptr != ' ')
+        ++end_ptr;
+    return string(start_ptr, end_ptr);
+}
+
+
+string ReadDomainId(const string& domain)
+{
+    string path(data_path + "/domains/" + domain);
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd == -1)
+        return "";
+    char buf[SPACE_COUNT];
+    ssize_t size = read(fd, buf, SPACE_COUNT);
+    ASSERT(size != -1);
+    close(fd);
+    char* start_ptr = buf;
+    while (isspace(*start_ptr) && start_ptr < buf + size)
+        ++start_ptr;
+    char* end_ptr = buf + size;
+    while (isspace(*(end_ptr - 1)) && end_ptr > start_ptr)
+        --end_ptr;
+    return string(start_ptr, end_ptr);
 }
 
 
@@ -457,58 +481,103 @@ int main(int argc, char** argv) {
         ssize_t count = read(conn_fd, buf, SPACE_COUNT);
         ASSERT(count == static_cast<ssize_t>(SPACE_COUNT));
         ASSERT(buf[count - 1] == ' ');
-        char* ptr = buf;
+        const char* ptr = buf;
         while (*ptr != ' ')
             ++ptr;
-        string method(buf, ptr);
-        char* ptrs[SPACE_COUNT] = {ptr};
-        size_t size = 1;
-        do {
-            do {
-                ++ptr;
-            } while (*ptr != '.' && *ptr != ' ');
-            ptrs[size++] = ptr;
-        } while (*ptr == '.');
-        ASSERT(size > 3);
-        ASSERT(string(ptrs[size - 3] + 1, ptrs[size - 2]) == "akshell");
-        string domain;
-        string app(ptrs[size - 4] + 1, ptrs[size - 3]);
-        string dev, ws, env;
-        if (app == "dev") {
-            if (size < 7) {
-                // TODO: send an error response
-                close(conn_fd);
-                continue;
-            }
-            app = "";
-            dev.assign(ptrs[size - 5] + 1, ptrs[size - 4]);
-            ws.assign(ptrs[size - 6] + 1, ptrs[size - 5]);
-            env.assign(ptrs[size - 7] + 1, ptrs[size - 6]);
-            domain = env + '.' + ws + '.' + dev + ".akshell.com";
-        } else {
-            domain = app + ".akshell.com";
-        }
+        string method(const_cast<const char*>(buf), ptr);
         if (method == "STOP") {
-            HostMap::iterator itr = host_map.find(domain);
+            HostMap::iterator itr = host_map.find(ParseId(ptr));
             if (itr != host_map.end()) {
-                delete itr->second;
+                Host* host_ptr(itr->second);
                 host_map.erase(itr);
+                BOOST_FOREACH(const string& domain, host_ptr->GetDomains())
+                    host_map.erase(domain);
+                delete host_ptr;
             }
         } else {
+            HostMap::iterator itr = host_map.end();
+            string id, dev, app, env, domain;
             char op;
             if (method == "EVAL") {
                 op = 'E';
+                id = ParseId(ptr);
             } else {
                 op = 'H';
+                const char* ptrs[SPACE_COUNT] = {ptr};
+                size_t size = 1;
+                do {
+                    do {
+                        ++ptr;
+                    } while (*ptr != '.' && *ptr != ' ');
+                    ptrs[size++] = ptr;
+                } while (*ptr == '.');
+                ASSERT(size > 2);
+                if (size > 6 &&
+                    (string(ptrs[size - 4] + 1, ptrs[size - 1]) ==
+                     "dev.akshell.com")) {
+                    dev.assign(ptrs[size - 5] + 1, ptrs[size - 4]);
+                    app.assign(ptrs[size - 6] + 1, ptrs[size - 5]);
+                    env.assign(ptrs[size - 7] + 1, ptrs[size - 6]);
+                    if (env == "release")
+                        env = "";
+                    id = dev + ':' + app + (env.empty() ? "" : ':' + env);
+                } else {
+                    string domain3;
+                    if (size > 3) {
+                        domain3.assign(ptrs[size - 4] + 1, ptrs[size - 1]);
+                        itr = host_map.find(domain3);
+                    }
+                    if (itr == host_map.end()) {
+                        string domain2(ptrs[size - 3] + 1, ptrs[size - 1]);
+                        itr = host_map.find(domain2);
+                        if (itr == host_map.end()) {
+                            if (!domain3.empty())
+                                id = ReadDomainId(domain3);
+                            if (!id.empty()) {
+                                domain = domain3;
+                            } else {
+                                id = ReadDomainId(domain2);
+                                if (!id.empty()) {
+                                    domain = domain2;
+                                } else {
+                                    pid_t pid = fork();
+                                    ASSERT(pid != -1);
+                                    if (!pid)
+                                        Reply(op, conn_fd,
+                                              ("Domain " +
+                                               string(ptrs[0] + 1,
+                                                      ptrs[size -1])));
+                                    close(conn_fd);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
                 count = read(conn_fd, buf, ptr - buf);
                 ASSERT(count == ptr - buf);
             }
-            HostMap::iterator itr =
-                host_map.insert(HostMap::value_type(domain, 0)).first;
-            if (itr->second)
-                itr->second->Run(op, conn_fd);
-            else
-                itr->second = new Host(domain, app, dev, ws, env, op, conn_fd);
+            if (itr == host_map.end())
+                itr = host_map.insert(HostMap::value_type(id, 0)).first;
+            Host*& host_ptr(itr->second);
+            if (host_ptr) {
+                host_ptr->Run(op, conn_fd);
+            } else {
+                if (dev.empty()) {
+                    size_t i1 = id.find_first_of(':');
+                    ASSERT(i1 != string::npos);
+                    dev = id.substr(0, i1);
+                    size_t i2 = id.find_first_of(':', i1 + 1);
+                    app = id.substr(i1 + 1, i2 - i1 - 1);
+                    if (i2 != string::npos)
+                        env = id.substr(i2 + 1);
+                }
+                host_ptr = new Host(id, dev, app, env, op, conn_fd);
+            }
+            if (!domain.empty()) {
+                host_ptr->GetDomains().push_back(domain);
+                host_map.insert(HostMap::value_type(domain, host_ptr));
+            }
         }
         close(conn_fd);
         time_t now = time(0);
@@ -516,7 +585,9 @@ int main(int argc, char** argv) {
             Host* host_ptr = Host::GetLastPtr();
             if (!host_ptr || now - host_ptr->GetTime() < timeout)
                 break;
-            host_map.erase(host_ptr->GetDomain());
+            host_map.erase(host_ptr->GetId());
+            BOOST_FOREACH(const string& domain, host_ptr->GetDomains())
+                host_map.erase(domain);
             delete host_ptr;
         }
         while (waitpid(-1, 0, WNOHANG) > 0)
