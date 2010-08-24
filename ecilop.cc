@@ -256,7 +256,7 @@ void Host::Launch(char op, int conn_fd)
         close(fd_pair[1]);
         return;
     }
-    string lock_path(locks_path + '/' + id_);
+    string lock_path(locks_path + '/' + dev_);
     int lock_fd = open(lock_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
     ASSERT(lock_fd != -1);
     ret = flock(lock_fd, LOCK_SH);
@@ -288,7 +288,8 @@ void Host::Launch(char op, int conn_fd)
         "--log-id", id_.c_str(),
         "--git", common_git_path_pattern.c_str(),
         "--git", grantor_git_path_pattern.c_str(),
-        0, 0, 0, 0, 0};
+        0, 0, 0, 0, 0
+    };
     size_t i = 14;
     string repo_name(dev_ + '/' + app_);
     if (env_.empty()) {
