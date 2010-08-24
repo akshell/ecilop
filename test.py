@@ -91,10 +91,11 @@ SELECT ak.create_schema('ecilop:echo:debug');
 
         if os.path.exists(TMP_PATH):
             shutil.rmtree(TMP_PATH)
-        echo_path = DATA_PATH + '/devs/ecilop/apps/echo'
+        ecilop_path = DATA_PATH + '/devs/ecilop'
+        echo_path = ecilop_path + '/apps/echo'
         os.makedirs(echo_path + '/code')
-        os.makedirs(echo_path + '/git')
-        os.makedirs(echo_path + '/envs')
+        os.mkdir(echo_path + '/git')
+        os.mkdir(echo_path + '/envs')
         write(echo_path + '/envs/debug', '')
         write(echo_path + '/code/main.js', '''
 env = 'release';
@@ -118,6 +119,8 @@ exports.handle = function (socket) {
   socket.write(socket.read().toString().toUpperCase());
 };
 ''')
+        os.mkdir(ecilop_path + '/grantors')
+        os.symlink(ecilop_path + '/apps', ecilop_path + '/grantors/ecilop')
         os.mkdir(DATA_PATH + '/domains')
         write(DATA_PATH + '/domains/echo.akshell.com', '\t ecilop:echo\r\n')
         write(DATA_PATH + '/domains/echo.com', 'ecilop:echo ')
@@ -126,8 +129,7 @@ exports.handle = function (socket) {
         write(PATSAK_CONFIG_PATH, '''\
 db=dbname=%s
 lib=%s
-git=%s/devs/%%s/apps/%%s/git
-''' % (DB_NAME, os.path.abspath(LIB_PATH), DATA_PATH))
+''' % (DB_NAME, os.path.abspath(LIB_PATH)))
         write(ECILOP_CONFIG_PATH, '''\
 socket=%s:600
 data=%s

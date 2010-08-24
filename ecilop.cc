@@ -33,6 +33,7 @@ string data_path;
 string locks_path;
 string patsak_path;
 string patsak_config_path;
+string common_git_path_pattern;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Utils
@@ -260,16 +261,16 @@ void Host::Launch(char op, int conn_fd)
     ASSERT(lock_fd != -1);
     ret = flock(lock_fd, LOCK_SH);
     ASSERT(ret == 0);
-    string host_path(data_path + "/devs/" + dev_ + "/apps/" + app_);
-    string check_path(env_.empty() ? host_path : host_path + "/envs/" + env_);
+    string dev_path(data_path + "/devs/" + dev_);
+    string app_path(dev_path + "/apps/" + app_);
+    string check_path(env_.empty() ? app_path : app_path + "/envs/" + env_);
     struct stat st;
     if (stat(check_path.c_str(), &st)) {
         ret = unlink(lock_path.c_str());
         ASSERT(ret == 0);
-        string dev_path(data_path + "/devs/" + dev_);
         if (stat(dev_path.c_str(), &st))
             Reply(op, conn_fd, "Developer " + dev_);
-        if (env_.empty() || stat(host_path.c_str(), &st))
+        if (env_.empty() || stat(app_path.c_str(), &st))
             Reply(op, conn_fd, "App " + app_ + ' ' + env_);
         else
             Reply(op, conn_fd, "Environment " + env_);
@@ -277,15 +278,18 @@ void Host::Launch(char op, int conn_fd)
     Send(op, conn_fd);
     int dup_fd = dup2(fd_pair[1], STDIN_FILENO);
     ASSERT(dup_fd == STDIN_FILENO);
-    string code_path(host_path + "/code");
+    string code_path(app_path + "/code");
+    string grantor_git_path_pattern(dev_path + "/grantors/%s/%s/git");
     const char* args[] = {
         patsak_path.c_str(), "work",
         "--app", code_path.c_str(),
         "--schema", id_.c_str(),
         "--tablespace", dev_.c_str(),
         "--log-id", id_.c_str(),
+        "--git", common_git_path_pattern.c_str(),
+        "--git", grantor_git_path_pattern.c_str(),
         0, 0, 0, 0, 0};
-    size_t i = 10;
+    size_t i = 14;
     string repo_name(dev_ + '/' + app_);
     if (env_.empty()) {
         args[i++] = "--repo";
@@ -406,6 +410,8 @@ int main(int argc, char** argv) {
     RequireOption("patsak", patsak_path);
     RequireOption("data", data_path);
     RequireOption("locks", locks_path);
+
+    common_git_path_pattern = data_path + "/devs/%s/libs/%s/git";
 
     size_t colon_idx = socket_descr.find_first_of(':');
     string socket_path(socket_descr.substr(0, colon_idx));
