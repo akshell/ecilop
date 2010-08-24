@@ -283,8 +283,9 @@ void Host::Launch(char op, int conn_fd)
         "--app", code_path.c_str(),
         "--schema", id_.c_str(),
         "--tablespace", dev_.c_str(),
+        "--log-id", id_.c_str(),
         0, 0, 0, 0, 0};
-    size_t i = 8;
+    size_t i = 10;
     string repo_name(dev_ + '/' + app_);
     if (env_.empty()) {
         args[i++] = "--repo";
