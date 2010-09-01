@@ -36,12 +36,12 @@ INIT_PATH = CURR_PATH + '/../patsak/init.sql'
 SPACE_COUNT = 128
 
 
-def write(path, data):
+def write_file(path, data):
     with open(path, 'w') as f:
         f.write(data)
 
 
-def read(path):
+def read_file(path):
     with open(path) as f:
         return f.read()
 
@@ -82,7 +82,7 @@ class Test(unittest.TestCase):
         popen(['dropdb', DB_NAME]).wait()
         popen(['createdb', DB_NAME]).wait()
         conn = psycopg2.connect('dbname=' + DB_NAME)
-        conn.cursor().execute(read(INIT_PATH) + '''
+        conn.cursor().execute(read_file(INIT_PATH) + '''
 SELECT ak.create_schema('ecilop:echo');
 SELECT ak.create_schema('ecilop:echo:debug');
 ''')
@@ -96,8 +96,8 @@ SELECT ak.create_schema('ecilop:echo:debug');
         os.makedirs(echo_path + '/code')
         os.mkdir(echo_path + '/git')
         os.mkdir(echo_path + '/envs')
-        write(echo_path + '/envs/debug', '')
-        write(echo_path + '/code/main.js', '''
+        write_file(echo_path + '/envs/debug', '')
+        write_file(echo_path + '/code/main.js', '''
 env = 'release';
 
 exports.handle = function (socket) {
@@ -112,7 +112,7 @@ exports.handle = function (socket) {
         popen(git_cmd + ['init']).wait()
         popen(git_cmd + ['add', 'main.js']).wait()
         popen(git_cmd + ['commit', '-m', 'Initial commit']).wait()
-        write(echo_path + '/code/main.js', '''
+        write_file(echo_path + '/code/main.js', '''
 env = 'debug';
 
 exports.handle = function (socket) {
@@ -122,15 +122,15 @@ exports.handle = function (socket) {
         os.mkdir(ecilop_path + '/grantors')
         os.symlink(ecilop_path + '/apps', ecilop_path + '/grantors/ecilop')
         os.mkdir(DATA_PATH + '/domains')
-        write(DATA_PATH + '/domains/echo.akshell.com', '\t ecilop:echo\r\n')
-        write(DATA_PATH + '/domains/echo.com', 'ecilop:echo ')
+        write_file(DATA_PATH + '/domains/echo.akshell.com', 'ecilop:echo')
+        write_file(DATA_PATH + '/domains/echo.com', 'ecilop:echo')
         os.mkdir(LOCKS_PATH)
 
-        write(PATSAK_CONFIG_PATH, '''\
+        write_file(PATSAK_CONFIG_PATH, '''\
 db=dbname=%s
 lib=%s
 ''' % (DB_NAME, os.path.abspath(LIB_PATH)))
-        write(ECILOP_CONFIG_PATH, '''\
+        write_file(ECILOP_CONFIG_PATH, '''\
 socket=%s:600
 data=%s
 locks=%s
@@ -150,7 +150,7 @@ timeout=1
         self.assertEqual(launch(['--bad']).wait(), 1)
         self.assertEqual(launch(['--help']).wait(), 0)
         self.assertEqual(launch(['--socket', 'bad/socket']).wait(), 1)
-        self.assertEqual(launch(['--background', '--log', 'bad/log']).wait(), 1)
+        self.assertEqual(launch(['--log', 'bad/log']).wait(), 1)
 
         process = launch(['--patsak', 'bad/patsak'])
         self.assertEqual(
@@ -164,9 +164,9 @@ timeout=1
         process = launch([])
         process.stdout.readline()
         self.assertEqual(request('echo.akshell.com', 'hello'), 'hello')
-        self.assertEqual(request('echo.com', 'hello'), 'hello')
         self.assertEqual(
             request('debug.echo.ecilop.dev.akshell.com', 'hi'), 'HI')
+        self.assertEqual(request('echo.com', 'hello'), 'hello')
         self.assertEqual(
             request('release.echo.ecilop.dev.akshell.com', 'hi'), 'hi')
         self.assertEqual(
@@ -177,6 +177,22 @@ timeout=1
         self.assertEqual(request('echo.com', 'hello'), 'hello')
         self.assertEqual(control('EVAL ecilop:echo', 'env'), 'Srelease')
         self.assertEqual(control('EVAL ecilop:echo:debug', 'env'), 'Sdebug')
+        control('STOP ecilop:echo:')
+        control('EVAL ecilop:echo:debug', 'env')
+        control('STOP ecilop:echo:debug')
+        control('STOP ecilop:echo:no-such')
+        control('EVAL ecilop:echo:debug', 'env')
+        control('STOP ecilop:echo')
+        control('EVAL ecilop:echo:debug', 'env')
+        control('STOP ecilop:echo:')
+        request('debug.echo.ecilop.dev.com')
+        request('echo.com')
+        for i in range(10):
+            sock = socket.socket(socket.AF_UNIX)
+            sock.connect(SOCKET_PATH)
+            sock.send('GET echo.com' + ' ' * SPACE_COUNT)
+            sock.close()
+        self.assertEqual(request('echo.com', 'works'), 'works')
         self.assertEqual(
             control('EVAL ecilop:echo:bad', 'env'),
             'EEnvironment bad not found')
@@ -185,6 +201,7 @@ timeout=1
             'FUncaught 1\n    at 1:0')
         self.assert_(
             'Domain bad.akshell.com' in request('bad.akshell.com'))
+        request('bad.echo.ecilop.dev.akshell.com')
         self.assert_(
             'Environment bad' in request('bad.echo.ecilop.dev.akshell.com'))
         self.assert_(
@@ -197,9 +214,6 @@ timeout=1
         self.assertEqual(request('echo.akshell.com', 'wake up'), 'wake up')
         process.send_signal(signal.SIGTERM)
         self.assertEqual(process.wait(), 0)
-
-        self.assertEqual(launch(['--background']).wait(), 0)
-        self.assertEqual(request('echo.akshell.com', 'hello'), 'hello')
 
 
 if __name__ == '__main__':

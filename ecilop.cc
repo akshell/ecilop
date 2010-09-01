@@ -18,6 +18,8 @@
 
 
 using namespace std;
+using boost::noncopyable;
+using boost::unordered_map;
 namespace po = boost::program_options;
 
 
@@ -105,125 +107,155 @@ void Reply(char op, int conn_fd, const string& object)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Host
+// Worker
 ////////////////////////////////////////////////////////////////////////////////
 
-class Host : boost::noncopyable {
+class Worker : noncopyable {
 public:
-    static Host* GetLastPtr();
+    enum State {
+        READY,
+        BUSY,
+        DEAD
+    };
 
-    Host(const string& id,
-         const string& dev,
-         const string& app,
-         const string& env,
-         char op,
-         int conn_fd);
+    static void Init();
 
-    ~Host();
+    Worker(const string& dev_name,
+           const string& app_name,
+           const string& env_name,
+           char op,
+           int conn_fd);
 
-    string GetId() const;
-    vector<string>& GetDomains();
-    time_t GetTime() const;
-    void Run(char op, int conn_fd);
+    ~Worker();
+
+    State Send(char op, int conn_fd);
 
 private:
-    static Host* first_ptr;
-    static Host* last_ptr;
+    typedef unordered_map<pid_t, Worker*> Map;
+    static Map pid_map;
 
-    string id_, dev_, app_, env_;
-    vector<string> domains_;
+    static void HandleChildEvent(int signal,
+                                 siginfo_t* info_ptr,
+                                 void* context_ptr);
+
+    State state_;
     int carrier_fd_;
-    time_t time_;
-    Host* next_ptr_;
-    Host* prev_ptr_;
-
-    bool Send(char op, int conn_fd) const;
-    void Launch(char op, int conn_fd);
-
+    pid_t pid_;
 };
 
 
-Host* Host::first_ptr = 0;
-Host* Host::last_ptr = 0;
+Worker::Map Worker::pid_map;
 
 
-Host* Host::GetLastPtr()
+Worker::Worker(const string& dev_name,
+               const string& app_name,
+               const string& env_name,
+               char op,
+               int conn_fd)
+    : state_(BUSY)
 {
-    return last_ptr;
-}
-
-
-Host::Host(const string& id,
-           const string& dev,
-           const string& app,
-           const string& env,
-           char op,
-           int conn_fd)
-    : id_(id)
-    , dev_(dev)
-    , app_(app)
-    , env_(env)
-    , next_ptr_(0)
-{
-    Launch(op, conn_fd);
-    time_ = time(0);
-    if (first_ptr) {
-        first_ptr->next_ptr_ = this;
-        prev_ptr_ = first_ptr;
-        first_ptr = this;
-    } else {
-        prev_ptr_ = 0;
-        first_ptr = last_ptr = this;
+    int fd_pair[2];
+    int ret = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fd_pair);
+    ASSERT(ret == 0);
+    carrier_fd_ = fd_pair[0];
+    pid_ = fork();
+    ASSERT(pid_ != -1);
+    if (pid_) {
+        close(fd_pair[1]);
+        pid_map.insert(Map::value_type(pid_, this));
+        return;
     }
+    string lock_path(locks_path + '/' + dev_name);
+    int lock_fd = open(lock_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    ASSERT(lock_fd != -1);
+    ret = flock(lock_fd, LOCK_SH);
+    ASSERT(ret == 0);
+    string dev_path(data_path + "/devs/" + dev_name);
+    string app_path(dev_path + "/apps/" + app_name);
+    string check_path(
+        env_name.empty() ? app_path : app_path + "/envs/" + env_name);
+    struct stat st;
+    if (stat(check_path.c_str(), &st)) {
+        ret = unlink(lock_path.c_str());
+        ASSERT(ret == 0);
+        if (stat(dev_path.c_str(), &st))
+            Reply(op, conn_fd, "Developer " + dev_name);
+        if (env_name.empty() || stat(app_path.c_str(), &st))
+            Reply(op, conn_fd, "App " + app_name);
+        else
+            Reply(op, conn_fd, "Environment " + env_name);
+    }
+    state_ = READY;
+    Send(op, conn_fd);
+    int dup_fd = dup2(fd_pair[1], STDIN_FILENO);
+    ASSERT(dup_fd == STDIN_FILENO);
+    string code_path(app_path + "/code");
+    string schema_name(dev_name + ':' + app_name);
+    if (!env_name.empty())
+        schema_name += ':' + env_name;
+    string grantor_git_path_pattern(dev_path + "/grantors/%s/%s/git");
+    const char* args[] = {
+        patsak_path.c_str(), "work",
+        "--app", code_path.c_str(),
+        "--schema", schema_name.c_str(),
+        "--tablespace", dev_name.c_str(),
+        "--log-id", schema_name.c_str(),
+        "--git", common_git_path_pattern.c_str(),
+        "--git", grantor_git_path_pattern.c_str(),
+        0, 0, 0, 0, 0
+    };
+    size_t i = 14;
+    string repo_name;
+    if (env_name.empty()) {
+        repo_name = dev_name + '/' + app_name;
+        args[i++] = "--repo";
+        args[i++] = repo_name.c_str();
+    }
+    if (!patsak_config_path.empty()) {
+        args[i++] = "--config";
+        args[i] = patsak_config_path.c_str();
+    }
+    execv(patsak_path.c_str(), const_cast<char**>(args));
+    Fail("Failed to launch patsak");
 }
 
 
-Host::~Host()
+Worker::~Worker()
 {
-    (next_ptr_ ? next_ptr_->prev_ptr_ : first_ptr) = prev_ptr_;
-    (prev_ptr_ ? prev_ptr_->next_ptr_ : last_ptr) = next_ptr_;
     close(carrier_fd_);
+    pid_map.erase(pid_);
 }
 
 
-string Host::GetId() const
+void Worker::Init()
 {
-    return id_;
+    struct sigaction action;
+    sigemptyset(&action.sa_mask);
+    action.sa_sigaction = HandleChildEvent;
+    action.sa_flags = SA_SIGINFO | SA_RESTART;
+    int ret = sigaction(SIGRTMIN, &action, 0);
+    ASSERT(ret == 0);
+    action.sa_flags |= SA_NOCLDWAIT;
+    ret = sigaction(SIGCHLD, &action, 0);
+    ASSERT(ret == 0);
 }
 
 
-vector<string>& Host::GetDomains()
+void Worker::HandleChildEvent(int signal,
+                              siginfo_t* info_ptr,
+                              void* /*context_ptr*/)
 {
-    return domains_;
+    Map::iterator itr = pid_map.find(info_ptr->si_pid);
+    if (itr != pid_map.end())
+        itr->second->state_ = signal == SIGCHLD ? DEAD : READY;
 }
 
 
-time_t Host::GetTime() const
+Worker::State Worker::Send(char op, int conn_fd)
 {
-    return time_;
-}
-
-
-void Host::Run(char op, int conn_fd)
-{
-    if (!Send(op, conn_fd)) {
-        close(carrier_fd_);
-        Launch(op, conn_fd);
-    }
-    time_ = time(0);
-    if (next_ptr_) {
-        next_ptr_->prev_ptr_ = prev_ptr_;
-        (prev_ptr_ ? prev_ptr_->next_ptr_ : last_ptr) = next_ptr_;
-        next_ptr_ = 0;
-        first_ptr->next_ptr_ = this;
-        prev_ptr_ = first_ptr;
-        first_ptr = this;
-    }
-}
-
-
-bool Host::Send(char op, int conn_fd) const
-{
+    if (state_ != READY)
+        return state_;
+    state_ = BUSY;
     struct msghdr msg;
     msg.msg_name = 0;
     msg.msg_namelen = 0;
@@ -240,80 +272,295 @@ bool Host::Send(char op, int conn_fd) const
     cmsg_ptr->cmsg_type = SCM_RIGHTS;
     cmsg_ptr->cmsg_len = CMSG_LEN(sizeof(int));
     *reinterpret_cast<int*>(CMSG_DATA(cmsg_ptr)) = conn_fd;
-    return sendmsg(carrier_fd_, &msg, 0) == 1;
+    return sendmsg(carrier_fd_, &msg, 0) == 1 ? READY : state_ = DEAD;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Host and App declarations
+////////////////////////////////////////////////////////////////////////////////
+
+class App;
+
+
+class Host : noncopyable {
+public:
+    static void Retire(int timeout);
+
+    Host(App& app, const string& env_name, char op, int conn_fd);
+    ~Host();
+
+    string GetEnvName() const;
+    void Run(char op, int conn_fd);
+
+private:
+    static Host* first_ptr;
+    static Host* last_ptr;
+
+    App& app_;
+    string env_name_;
+    vector<Worker*> worker_ptrs_;
+    time_t time_;
+    Host* next_ptr_;
+    Host* prev_ptr_;
+};
+
+
+class App : noncopyable {
+public:
+    static App* Get(const string& dev_name, const string& app_name);
+    static App& GetOrCreate(const string& dev_name, const string& app_name);
+    static App* GetByDomain(const string& domain);
+
+    ~App();
+
+    string GetDevName() const;
+    string GetAppName() const;
+    void AddDomain(const string& domain);
+    void Run(const string& env_name, char op, int conn_fd);
+    void Stop(Host* host_ptr);
+    void Stop(const string& env_name);
+    void StopEnvs();
+
+private:
+    typedef unordered_map<string, App*> Map;
+    static Map id_map;
+    static Map domain_map;
+
+    string dev_name_;
+    string app_name_;
+    string id_;
+    vector<string> domains_;
+    vector<Host*> host_ptrs_;
+
+    static string GetId(const string& dev_name, const string& app_name);
+
+    App(const string& dev_name, const string& app_name);
+
+    void DoStop(size_t i);
+};
+
+////////////////////////////////////////////////////////////////////////////////
+// Host definitions
+////////////////////////////////////////////////////////////////////////////////
+
+Host* Host::first_ptr = 0;
+Host* Host::last_ptr = 0;
+
+
+Host::Host(App& app, const string& env_name, char op, int conn_fd)
+    : app_(app)
+    , env_name_(env_name)
+    , next_ptr_(0)
+{
+    worker_ptrs_.push_back(
+        new Worker(app.GetDevName(), app.GetAppName(), env_name, op, conn_fd));
+    time_ = time(0);
+    if (first_ptr) {
+        first_ptr->next_ptr_ = this;
+        prev_ptr_ = first_ptr;
+        first_ptr = this;
+    } else {
+        prev_ptr_ = 0;
+        first_ptr = last_ptr = this;
+    }
 }
 
 
-void Host::Launch(char op, int conn_fd)
+Host::~Host()
 {
-    int fd_pair[2];
-    int ret = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fd_pair);
-    ASSERT(ret == 0);
-    carrier_fd_ = fd_pair[0];
-    pid_t pid = fork();
-    ASSERT(pid != -1);
-    if (pid) {
-        close(fd_pair[1]);
+    (next_ptr_ ? next_ptr_->prev_ptr_ : first_ptr) = prev_ptr_;
+    (prev_ptr_ ? prev_ptr_->next_ptr_ : last_ptr) = next_ptr_;
+    BOOST_FOREACH(Worker* worker_ptr, worker_ptrs_)
+        delete worker_ptr;
+}
+
+
+void Host::Retire(int timeout)
+{
+    time_t now = time(0);
+    while (last_ptr && now - last_ptr->time_ >= timeout)
+        last_ptr->app_.Stop(last_ptr);
+}
+
+
+string Host::GetEnvName() const
+{
+    return env_name_;
+}
+
+
+void Host::Run(char op, int conn_fd)
+{
+    ASSERT(!worker_ptrs_.empty());
+    size_t i = 0;
+    while (i < worker_ptrs_.size()) {
+        Worker*& worker_ptr(worker_ptrs_[i]);
+        Worker::State state = worker_ptr->Send(op, conn_fd);
+        if (state == Worker::READY)
+            break;
+        if (state == Worker::BUSY) {
+            ++i;
+        } else {
+            ASSERT(state == Worker::DEAD);
+            delete worker_ptr;
+            worker_ptr = *(worker_ptrs_.end() - 1);
+            worker_ptrs_.erase(worker_ptrs_.end() - 1);
+        }
+    }
+    if (i + 1 < worker_ptrs_.size())
         return;
+    time_ = time(0);
+    if (next_ptr_) {
+        next_ptr_->prev_ptr_ = prev_ptr_;
+        (prev_ptr_ ? prev_ptr_->next_ptr_ : last_ptr) = next_ptr_;
+        next_ptr_ = 0;
+        first_ptr->next_ptr_ = this;
+        prev_ptr_ = first_ptr;
+        first_ptr = this;
     }
-    string lock_path(locks_path + '/' + dev_);
-    int lock_fd = open(lock_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
-    ASSERT(lock_fd != -1);
-    ret = flock(lock_fd, LOCK_SH);
-    ASSERT(ret == 0);
-    string dev_path(data_path + "/devs/" + dev_);
-    string app_path(dev_path + "/apps/" + app_);
-    string check_path(env_.empty() ? app_path : app_path + "/envs/" + env_);
-    struct stat st;
-    if (stat(check_path.c_str(), &st)) {
-        ret = unlink(lock_path.c_str());
-        ASSERT(ret == 0);
-        if (stat(dev_path.c_str(), &st))
-            Reply(op, conn_fd, "Developer " + dev_);
-        if (env_.empty() || stat(app_path.c_str(), &st))
-            Reply(op, conn_fd, "App " + app_ + ' ' + env_);
+    if (i == worker_ptrs_.size())
+        worker_ptrs_.push_back(
+            new Worker(app_.GetDevName(), app_.GetAppName(), env_name_,
+                       op, conn_fd));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// App definitions
+////////////////////////////////////////////////////////////////////////////////
+
+App::Map App::id_map;
+App::Map App::domain_map;
+
+
+App::App(const string& dev_name, const string& app_name)
+    : dev_name_(dev_name)
+    , app_name_(app_name)
+{
+    id_map.insert(Map::value_type(GetId(dev_name, app_name), this));
+}
+
+
+App::~App()
+{
+    id_map.erase(GetId(dev_name_, app_name_));
+    BOOST_FOREACH(const string& domain, domains_)
+        domain_map.erase(domain);
+    BOOST_FOREACH(Host* host_ptr, host_ptrs_)
+        delete host_ptr;
+}
+
+
+string App::GetId(const string& dev_name, const string& app_name)
+{
+    return dev_name + ':' + app_name;
+}
+
+
+App* App::Get(const string& dev_name, const string& app_name)
+{
+    Map::iterator itr = id_map.find(GetId(dev_name, app_name));
+    return itr == id_map.end() ? 0 : itr->second;
+}
+
+
+App& App::GetOrCreate(const string& dev_name, const string& app_name)
+{
+    App* app_ptr = Get(dev_name, app_name);
+    return *(app_ptr ? app_ptr : new App(dev_name, app_name));
+}
+
+
+App* App::GetByDomain(const string& domain)
+{
+    Map::iterator itr = domain_map.find(domain);
+    return itr == domain_map.end() ? 0 : itr->second;
+}
+
+
+string App::GetDevName() const
+{
+    return dev_name_;
+}
+
+
+string App::GetAppName() const
+{
+    return app_name_;
+}
+
+
+void App::AddDomain(const string& domain)
+{
+    domain_map.insert(Map::value_type(domain, this));
+    domains_.push_back(domain);
+}
+
+
+void App::Run(const string& env_name, char op, int conn_fd)
+{
+    BOOST_FOREACH(Host* host_ptr, host_ptrs_) {
+        if (host_ptr->GetEnvName() == env_name) {
+            host_ptr->Run(op, conn_fd);
+            return;
+        }
+    }
+    host_ptrs_.push_back(new Host(*this, env_name, op, conn_fd));
+}
+
+
+void App::Stop(Host* host_ptr)
+{
+    for (size_t i = 0;; ++i) {
+        ASSERT(i < host_ptrs_.size());
+        if (host_ptrs_[i] == host_ptr) {
+            DoStop(i);
+            return;
+        }
+    }
+}
+
+
+void App::Stop(const string& env_name)
+{
+    for (size_t i = 0; i < host_ptrs_.size(); ++i) {
+        if (host_ptrs_[i]->GetEnvName() == env_name) {
+            DoStop(i);
+            return;
+        }
+    }
+}
+
+
+void App::StopEnvs()
+{
+    vector<Host*> new_host_ptrs;
+    BOOST_FOREACH(Host* host_ptr, host_ptrs_) {
+        if (host_ptr->GetEnvName().empty())
+            new_host_ptrs.push_back(host_ptr);
         else
-            Reply(op, conn_fd, "Environment " + env_);
+            delete host_ptr;
     }
-    Send(op, conn_fd);
-    int dup_fd = dup2(fd_pair[1], STDIN_FILENO);
-    ASSERT(dup_fd == STDIN_FILENO);
-    string code_path(app_path + "/code");
-    string grantor_git_path_pattern(dev_path + "/grantors/%s/%s/git");
-    const char* args[] = {
-        patsak_path.c_str(), "work",
-        "--app", code_path.c_str(),
-        "--schema", id_.c_str(),
-        "--tablespace", dev_.c_str(),
-        "--log-id", id_.c_str(),
-        "--git", common_git_path_pattern.c_str(),
-        "--git", grantor_git_path_pattern.c_str(),
-        0, 0, 0, 0, 0
-    };
-    size_t i = 14;
-    string repo_name(dev_ + '/' + app_);
-    if (env_.empty()) {
-        args[i++] = "--repo";
-        args[i++] = repo_name.c_str();
+    swap(host_ptrs_, new_host_ptrs);
+    if (host_ptrs_.empty())
+        delete this;
+}
+
+
+void App::DoStop(size_t i)
+{
+    ASSERT(i < host_ptrs_.size());
+    if (host_ptrs_.size() == 1) {
+        delete this;
+    } else {
+        delete host_ptrs_[i];
+        host_ptrs_[i] = *(host_ptrs_.end() - 1);
+        host_ptrs_.erase(host_ptrs_.end() - 1);
     }
-    if (!patsak_config_path.empty()) {
-        args[i++] = "--config";
-        args[i] = patsak_config_path.c_str();
-    }
-    execv(patsak_path.c_str(), const_cast<char**>(args));
-    Fail("Failed to launch patsak");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // main
 ////////////////////////////////////////////////////////////////////////////////
-
-void MakePathAbsolute(const string& curr_path, string& path)
-{
-    if (path.empty() || path[0] != '/')
-        path = curr_path + '/' + path;
-}
-
 
 void RequireOption(const string& name, const string& value)
 {
@@ -330,11 +577,17 @@ void HandleStop(int /*signal*/)
 }
 
 
-string ParseId(const char* start_ptr) {
-    const char* end_ptr = ++start_ptr;
-    while (*end_ptr != ' ')
-        ++end_ptr;
-    return string(start_ptr, end_ptr);
+vector<string> Split(const string& str, char sep)
+{
+    vector<string> result;
+    for (size_t i = 0; i <= str.size();) {
+        size_t j = i;
+        while (j < str.size() && str[j] != sep)
+            ++j;
+        result.push_back(str.substr(i, j - i));
+        i = j + 1;
+    }
+    return result;
 }
 
 
@@ -348,17 +601,13 @@ string ReadDomainId(const string& domain)
     ssize_t size = read(fd, buf, SPACE_COUNT);
     ASSERT(size != -1);
     close(fd);
-    char* start_ptr = buf;
-    while (isspace(*start_ptr) && start_ptr < buf + size)
-        ++start_ptr;
-    char* end_ptr = buf + size;
-    while (isspace(*(end_ptr - 1)) && end_ptr > start_ptr)
-        --end_ptr;
-    return string(start_ptr, end_ptr);
+    return string(buf, size);
 }
 
 
 int main(int argc, char** argv) {
+    Worker::Init();
+
     po::options_description generic_options("Generic options");
     generic_options.add_options()
         ("help,h", "print help message")
@@ -379,7 +628,6 @@ int main(int argc, char** argv) {
          "alternative patsak config")
         ("timeout,t", po::value<int>(&timeout)->default_value(60),
          "stop timeout")
-        ("background,b", "run in background")
         ;
 
     po::options_description cmdline_options(
@@ -414,34 +662,18 @@ int main(int argc, char** argv) {
 
     common_git_path_pattern = data_path + "/devs/%s/libs/%s/git";
 
+    if (!log_path.empty()) {
+        if (!freopen(log_path.c_str(), "a", stderr)) {
+            cout << "Failed to open log file: " << strerror(errno) << '\n';
+            return 1;
+        }
+    }
+
     size_t colon_idx = socket_descr.find_first_of(':');
     string socket_path(socket_descr.substr(0, colon_idx));
     string socket_mode;
     if (colon_idx != string::npos)
         socket_mode = socket_descr.substr(colon_idx + 1);
-
-    if (vm.count("background")) {
-        RequireOption("log-file", log_path);
-        if (!freopen(log_path.c_str(), "a", stderr)) {
-            cout << "Failed to open log file: " << strerror(errno) << '\n';
-            return 1;
-        }
-        char* curr_path = get_current_dir_name();
-        MakePathAbsolute(curr_path, socket_path);
-        MakePathAbsolute(curr_path, patsak_path);
-        MakePathAbsolute(curr_path, data_path);
-        MakePathAbsolute(curr_path, locks_path);
-        free(curr_path);
-        pid_t pid = fork();
-        ASSERT(pid != -1);
-        if (pid)
-            return 0;
-        umask(0);
-        pid_t sid = setsid();
-        ASSERT(sid != -1);
-        int ret = chdir("/");
-        ASSERT(ret == 0);
-    }
 
     int listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     ASSERT(listen_fd != -1);
@@ -459,16 +691,7 @@ int main(int argc, char** argv) {
         chmod(socket_path.c_str(), strtol(socket_mode.c_str(), 0, 8));
     int ret = listen(listen_fd, SOMAXCONN);
     ASSERT(ret == 0);
-
-    cout << "Running at " << socket_path << endl;
-    if (vm.count("background")) {
-        FILE* file_ptr = freopen("/dev/null", "w", stdout);
-        ASSERT(file_ptr);
-        file_ptr = freopen("/dev/null", "r", stdin);
-        ASSERT(file_ptr);
-    } else {
-        cout << "Quit with Control-C." << endl;
-    }
+    cout << "Running at " << socket_path << "\nQuit with Control-C." << endl;
 
     struct sigaction action;
     action.sa_handler = HandleStop;
@@ -478,9 +701,6 @@ int main(int argc, char** argv) {
     ASSERT(ret == 0);
     ret = sigaction(SIGINT, &action, 0);
     ASSERT(ret == 0);
-
-    typedef boost::unordered_map<string, Host*> HostMap;
-    HostMap host_map;
 
     for (;;) {
         int conn_fd = accept4(listen_fd, 0, 0, SOCK_CLOEXEC);
@@ -493,52 +713,61 @@ int main(int argc, char** argv) {
         while (*ptr != ' ')
             ++ptr;
         string method(const_cast<const char*>(buf), ptr);
+        const char* descr_start_ptr = ++ptr;
+        while (*ptr != ' ')
+            ++ptr;
+        string descr(descr_start_ptr, ptr);
         if (method == "STOP") {
-            HostMap::iterator itr = host_map.find(ParseId(ptr));
-            if (itr != host_map.end()) {
-                Host* host_ptr(itr->second);
-                host_map.erase(itr);
-                BOOST_FOREACH(const string& domain, host_ptr->GetDomains())
-                    host_map.erase(domain);
-                delete host_ptr;
+            vector<string> parts(Split(descr, ':'));
+            ASSERT(parts.size() == 2 || parts.size() == 3);
+            if (App* app_ptr = App::Get(parts[0], parts[1])) {
+                if (parts.size() == 2)
+                    delete app_ptr;
+                else if (parts[2].empty())
+                    app_ptr->StopEnvs();
+                else
+                    app_ptr->Stop(parts[2]);
             }
         } else {
-            HostMap::iterator itr = host_map.end();
-            string id, dev, app, env, domain;
+            App* app_ptr = 0;
+            string env_name;
             char op;
             if (method == "EVAL") {
                 op = 'E';
-                id = ParseId(ptr);
+                vector<string> parts(Split(descr, ':'));
+                ASSERT(parts.size() == 2 || parts.size() == 3);
+                app_ptr = &App::GetOrCreate(parts[0], parts[1]);
+                env_name = parts.size() == 3 ? parts[2] : "";
             } else {
                 op = 'H';
-                const char* ptrs[SPACE_COUNT] = {ptr};
-                size_t size = 1;
-                do {
-                    do {
-                        ++ptr;
-                    } while (*ptr != '.' && *ptr != ' ');
-                    ptrs[size++] = ptr;
-                } while (*ptr == '.');
-                ASSERT(size > 2);
-                if (size > 6 &&
-                    (string(ptrs[size - 4] + 1, ptrs[size - 1]) ==
-                     "dev.akshell.com")) {
-                    dev.assign(ptrs[size - 5] + 1, ptrs[size - 4]);
-                    app.assign(ptrs[size - 6] + 1, ptrs[size - 5]);
-                    env.assign(ptrs[size - 7] + 1, ptrs[size - 6]);
-                    if (env == "release")
-                        env = "";
-                    id = dev + ':' + app + (env.empty() ? "" : ':' + env);
+                count = read(conn_fd, buf, ptr - buf);
+                ASSERT(count == ptr - buf);
+                vector<string> parts(Split(descr, '.'));
+                ASSERT(parts.size() >= 2);
+                if (parts.size() >= 6 &&
+                    *(parts.end() - 3) == "dev" &&
+                    *(parts.end() - 2) == "akshell" &&
+                    *(parts.end() - 1) == "com") {
+                    app_ptr = &App::GetOrCreate(*(parts.end() - 4),
+                                                *(parts.end() - 5));
+                    env_name = *(parts.end() - 6);
+                    if (env_name == "release")
+                        env_name = "";
                 } else {
                     string domain3;
-                    if (size > 3) {
-                        domain3.assign(ptrs[size - 4] + 1, ptrs[size - 1]);
-                        itr = host_map.find(domain3);
+                    if (parts.size() >= 3) {
+                        domain3 = (*(parts.end() - 3) + '.' +
+                                   *(parts.end() - 2) + '.' +
+                                   *(parts.end() - 1));
+                        app_ptr = App::GetByDomain(domain3);
                     }
-                    if (itr == host_map.end()) {
-                        string domain2(ptrs[size - 3] + 1, ptrs[size - 1]);
-                        itr = host_map.find(domain2);
-                        if (itr == host_map.end()) {
+                    if (!app_ptr) {
+                        string domain2 = (*(parts.end() - 2) + '.' +
+                                          *(parts.end() - 1));
+                        app_ptr = App::GetByDomain(domain2);
+                        if (!app_ptr) {
+                            string domain;
+                            string id;
                             if (!domain3.empty())
                                 id = ReadDomainId(domain3);
                             if (!id.empty()) {
@@ -551,54 +780,23 @@ int main(int argc, char** argv) {
                                     pid_t pid = fork();
                                     ASSERT(pid != -1);
                                     if (!pid)
-                                        Reply(op, conn_fd,
-                                              ("Domain " +
-                                               string(ptrs[0] + 1,
-                                                      ptrs[size -1])));
+                                        Reply(op, conn_fd, "Domain " + descr);
                                     close(conn_fd);
                                     continue;
                                 }
                             }
+                            vector<string> id_parts(Split(id, ':'));
+                            ASSERT(id_parts.size() == 2);
+                            app_ptr = &App::GetOrCreate(id_parts[0],
+                                                        id_parts[1]);
+                            app_ptr->AddDomain(domain);
                         }
                     }
                 }
-                count = read(conn_fd, buf, ptr - buf);
-                ASSERT(count == ptr - buf);
             }
-            if (itr == host_map.end())
-                itr = host_map.insert(HostMap::value_type(id, 0)).first;
-            Host*& host_ptr(itr->second);
-            if (host_ptr) {
-                host_ptr->Run(op, conn_fd);
-            } else {
-                if (dev.empty()) {
-                    size_t i1 = id.find_first_of(':');
-                    ASSERT(i1 != string::npos);
-                    dev = id.substr(0, i1);
-                    size_t i2 = id.find_first_of(':', i1 + 1);
-                    app = id.substr(i1 + 1, i2 - i1 - 1);
-                    if (i2 != string::npos)
-                        env = id.substr(i2 + 1);
-                }
-                host_ptr = new Host(id, dev, app, env, op, conn_fd);
-            }
-            if (!domain.empty()) {
-                host_ptr->GetDomains().push_back(domain);
-                host_map.insert(HostMap::value_type(domain, host_ptr));
-            }
+            app_ptr->Run(env_name, op, conn_fd);
         }
         close(conn_fd);
-        time_t now = time(0);
-        for (;;) {
-            Host* host_ptr = Host::GetLastPtr();
-            if (!host_ptr || now - host_ptr->GetTime() < timeout)
-                break;
-            host_map.erase(host_ptr->GetId());
-            BOOST_FOREACH(const string& domain, host_ptr->GetDomains())
-                host_map.erase(domain);
-            delete host_ptr;
-        }
-        while (waitpid(-1, 0, WNOHANG) > 0)
-            ;
+        Host::Retire(timeout);
     }
 }
