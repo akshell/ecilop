@@ -176,10 +176,11 @@ Worker::Worker(const string& dev_name,
         env_name.empty() ? app_path : app_path + "/envs/" + env_name);
     struct stat st;
     if (stat(check_path.c_str(), &st)) {
-        ret = unlink(lock_path.c_str());
-        ASSERT(ret == 0);
-        if (stat(dev_path.c_str(), &st))
+        if (stat(dev_path.c_str(), &st)) {
+            ret = unlink(lock_path.c_str());
+            ASSERT(ret == 0);
             Reply(op, conn_fd, "Developer " + dev_name);
+        }
         if (env_name.empty() || stat(app_path.c_str(), &st))
             Reply(op, conn_fd, "App " + app_name);
         else
