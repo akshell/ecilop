@@ -10,9 +10,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <netdb.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/file.h>
 #include <sys/wait.h>
 
@@ -616,17 +616,20 @@ int main(int argc, char** argv) {
          "config file")
         ;
 
-    string socket_descr, log_path;
+    string log_path;
+    string host;
+    string port;
     int timeout;
     po::options_description config_options("Config options");
     config_options.add_options()
-        ("socket,s", po::value<string>(&socket_descr), "serve socket")
         ("data,d", po::value<string>(&data_path), "data directory")
         ("locks,l", po::value<string>(&locks_path), "locks directory")
         ("log,o", po::value<string>(&log_path), "log file")
         ("patsak,p", po::value<string>(&patsak_path), "patsak executable")
-        ("patsak-config,a", po::value<string>(&patsak_config_path),
+        ("patsak-config,C", po::value<string>(&patsak_config_path),
          "alternative patsak config")
+        ("host,H", po::value<string>(&host)->default_value("localhost"), "host")
+        ("port,P", po::value<string>(&port)->default_value("9864"), "port")
         ("timeout,t", po::value<int>(&timeout)->default_value(60),
          "stop timeout")
         ;
@@ -656,43 +659,31 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    RequireOption("socket", socket_descr);
     RequireOption("patsak", patsak_path);
     RequireOption("data", data_path);
     RequireOption("locks", locks_path);
 
     common_git_path_pattern = data_path + "/devs/%s/libs/%s/git";
 
-    if (!log_path.empty()) {
-        if (!freopen(log_path.c_str(), "a", stderr)) {
-            cout << "Failed to open log file: " << strerror(errno) << '\n';
-            return 1;
-        }
-    }
-
-    size_t colon_idx = socket_descr.find_first_of(':');
-    string socket_path(socket_descr.substr(0, colon_idx));
-    string socket_mode;
-    if (colon_idx != string::npos)
-        socket_mode = socket_descr.substr(colon_idx + 1);
-
-    int listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* info_ptr;
+    if (int ret = getaddrinfo(host.c_str(), port.c_str(), &hints, &info_ptr))
+        Fail(gai_strerror(ret));
+    int listen_fd = socket(
+        info_ptr->ai_family, info_ptr->ai_socktype, info_ptr->ai_protocol);
     ASSERT(listen_fd != -1);
-    unlink(socket_path.c_str());
-    struct sockaddr_un address;
-    address.sun_family = AF_UNIX;
-    strncpy(address.sun_path,
-            socket_path.c_str(),
-            sizeof(address.sun_path) - 1);
-    if (bind(listen_fd,
-             reinterpret_cast<struct sockaddr*>(&address),
-             SUN_LEN(&address)))
-        Fail("Failed to bind");
-    if (!socket_mode.empty())
-        chmod(socket_path.c_str(), strtol(socket_mode.c_str(), 0, 8));
-    int ret = listen(listen_fd, SOMAXCONN);
+    int yes = 1;
+    int ret = setsockopt(
+        listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     ASSERT(ret == 0);
-    cout << "Running at " << socket_path << "\nQuit with Control-C." << endl;
+    if (bind(listen_fd, info_ptr->ai_addr, info_ptr->ai_addrlen))
+        Fail(strerror(errno));
+    freeaddrinfo(info_ptr);
+    ret = listen(listen_fd, SOMAXCONN);
+    ASSERT(ret == 0);
 
     struct sigaction action;
     action.sa_handler = HandleStop;
@@ -702,6 +693,16 @@ int main(int argc, char** argv) {
     ASSERT(ret == 0);
     ret = sigaction(SIGINT, &action, 0);
     ASSERT(ret == 0);
+
+    if (!log_path.empty()) {
+        if (!freopen(log_path.c_str(), "a", stderr)) {
+            cout << "Failed to open log file: " << strerror(errno) << '\n';
+            return 1;
+        }
+    }
+
+    cout << "Running at " << host << ':' << port
+         << "\nQuit with Control-C." << endl;
 
     for (;;) {
         int conn_fd = accept4(listen_fd, 0, 0, SOCK_CLOEXEC);

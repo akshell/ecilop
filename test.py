@@ -22,7 +22,6 @@ if len(sys.argv) > 1:
 
 DB_NAME = 'test-ecilop'
 TMP_PATH  = '/tmp/ecilop'
-SOCKET_PATH = TMP_PATH + '/socket'
 DATA_PATH = TMP_PATH + '/data'
 LOCKS_PATH = TMP_PATH + '/locks'
 LOG_PATH = TMP_PATH + '/log'
@@ -59,8 +58,8 @@ def launch(args):
 
 
 def talk(data):
-    sock = socket.socket(socket.AF_UNIX)
-    sock.connect(SOCKET_PATH)
+    sock = socket.socket(socket.AF_INET)
+    sock.connect(('localhost', 9864))
     sock.send(data)
     sock.shutdown(socket.SHUT_WR)
     try:
@@ -131,15 +130,13 @@ db=dbname=%s
 lib=%s
 ''' % (DB_NAME, os.path.abspath(LIB_PATH)))
         write_file(ECILOP_CONFIG_PATH, '''\
-socket=%s:600
 data=%s
 locks=%s
 log=%s
 patsak=%s
 patsak-config=%s
 timeout=1
-''' % (SOCKET_PATH, DATA_PATH, LOCKS_PATH, LOG_PATH,
-       PATSAK_PATH, PATSAK_CONFIG_PATH))
+''' % (DATA_PATH, LOCKS_PATH, LOG_PATH, PATSAK_PATH, PATSAK_CONFIG_PATH))
 
     def tearDown(self):
         popen(['killall', ECILOP_CMD])
@@ -154,7 +151,7 @@ timeout=1
 
         process = launch(['--patsak', 'bad/patsak'])
         self.assertEqual(
-            process.stdout.readline(), 'Running at /tmp/ecilop/socket\n')
+            process.stdout.readline(), 'Running at localhost:9864\n')
         self.assertEqual(
             process.stdout.readline(), 'Quit with Control-C.\n')
         self.assertRaises(socket.error, request, 'echo.akshell.com', 'hello')
@@ -188,8 +185,8 @@ timeout=1
         request('debug.echo.ecilop.dev.com')
         request('echo.com')
         for i in range(10):
-            sock = socket.socket(socket.AF_UNIX)
-            sock.connect(SOCKET_PATH)
+            sock = socket.socket(socket.AF_INET)
+            sock.connect(('localhost', 9864))
             sock.send('GET echo.com' + ' ' * SPACE_COUNT)
             sock.close()
         self.assertEqual(request('echo.com', 'works'), 'works')
