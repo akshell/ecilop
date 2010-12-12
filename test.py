@@ -60,7 +60,7 @@ def launch(args):
 
 def talk(data):
     sock = socket.socket(socket.AF_INET)
-    sock.connect(('localhost', PORT))
+    sock.connect(('127.0.0.1', PORT))
     sock.send(data)
     sock.shutdown(socket.SHUT_WR)
     try:
@@ -70,7 +70,9 @@ def talk(data):
 
 
 def request(host, message=''):
-    return talk('GET ' + host + ' ' * SPACE_COUNT + message)
+    return talk(
+        ('GET /' if host.endswith('.dev.akshell.com') else 'GET ') +
+        host + ' ' * SPACE_COUNT + message)
 
 
 def control(command, message=''):
@@ -153,7 +155,7 @@ timeout=1
 
         process = launch(['--patsak', 'bad/patsak'])
         self.assertEqual(
-            process.stdout.readline(), 'Running at localhost:%d\n' % PORT)
+            process.stdout.readline(), 'Running at 127.0.0.1:%d\n' % PORT)
         self.assertEqual(
             process.stdout.readline(), 'Quit with Control-C.\n')
         self.assertRaises(socket.error, request, 'echo.akshell.com', 'hello')
@@ -188,7 +190,7 @@ timeout=1
         request('echo.com')
         for i in range(10):
             sock = socket.socket(socket.AF_INET)
-            sock.connect(('localhost', PORT))
+            sock.connect(('127.0.0.1', PORT))
             sock.send('GET echo.com' + ' ' * SPACE_COUNT)
             sock.close()
         self.assertEqual(request('echo.com', 'works'), 'works')

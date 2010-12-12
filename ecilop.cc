@@ -106,6 +106,14 @@ void Reply(char op, int conn_fd, const string& object)
     exit(1);
 }
 
+void SetCloseOnExec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD);
+    ASSERT(flags != -1);
+    int ret = fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    ASSERT(ret == 0);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Worker
 ////////////////////////////////////////////////////////////////////////////////
@@ -155,8 +163,10 @@ Worker::Worker(const string& dev_name,
     : state_(BUSY)
 {
     int fd_pair[2];
-    int ret = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fd_pair);
+    int ret = socketpair(AF_UNIX, SOCK_STREAM, 0, fd_pair);
     ASSERT(ret == 0);
+    SetCloseOnExec(fd_pair[0]);
+    SetCloseOnExec(fd_pair[1]);
     carrier_fd_ = fd_pair[0];
     pid_ = fork();
     ASSERT(pid_ != -1);
@@ -628,7 +638,7 @@ int main(int argc, char** argv) {
         ("patsak,p", po::value<string>(&patsak_path), "patsak executable")
         ("patsak-config,C", po::value<string>(&patsak_config_path),
          "alternative patsak config")
-        ("host,H", po::value<string>(&host)->default_value("localhost"), "host")
+        ("host,H", po::value<string>(&host)->default_value("127.0.0.1"), "host")
         ("port,P", po::value<string>(&port)->default_value("9864"), "port")
         ("timeout,t", po::value<int>(&timeout)->default_value(60),
          "stop timeout")
@@ -705,8 +715,9 @@ int main(int argc, char** argv) {
          << "\nQuit with Control-C." << endl;
 
     for (;;) {
-        int conn_fd = accept4(listen_fd, 0, 0, SOCK_CLOEXEC);
+        int conn_fd = accept(listen_fd, 0, 0);
         ASSERT(conn_fd != -1);
+        SetCloseOnExec(conn_fd);
         char buf[SPACE_COUNT];
         ssize_t count = read(conn_fd, buf, SPACE_COUNT);
         ASSERT(count == static_cast<ssize_t>(SPACE_COUNT));
@@ -715,7 +726,10 @@ int main(int argc, char** argv) {
         while (*ptr != ' ')
             ++ptr;
         string method(const_cast<const char*>(buf), ptr);
-        const char* descr_start_ptr = ++ptr;
+        bool has_leading_slash = *(++ptr) == '/';
+        if (has_leading_slash)
+            ++ptr;
+        const char* descr_start_ptr = ptr;
         while (*ptr != ' ')
             ++ptr;
         string descr(descr_start_ptr, ptr);
@@ -746,10 +760,7 @@ int main(int argc, char** argv) {
                 ASSERT(count == ptr - buf);
                 vector<string> parts(Split(descr, '.'));
                 ASSERT(parts.size() >= 2);
-                if (parts.size() >= 6 &&
-                    *(parts.end() - 3) == "dev" &&
-                    *(parts.end() - 2) == "akshell" &&
-                    *(parts.end() - 1) == "com") {
+                if (has_leading_slash) {
                     app_ptr = &App::GetOrCreate(*(parts.end() - 4),
                                                 *(parts.end() - 5));
                     env_name = *(parts.end() - 6);
