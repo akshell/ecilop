@@ -6,12 +6,13 @@ LDFLAGS=-lboost_program_options-mt
 all: ecilop
 
 ecilop: ecilop.cc
+	$(CXX) $< -o $@ $(CXXFLAGS) -Wl,-Bstatic $(LDFLAGS) -lstdc++ -Wl,-Bdynamic
 
 ecilop-d: ecilop.cc
-	$(CXX) -o $@ $(CXXFLAGS) $(LDFLAGS) -ggdb3 $<
+	$(CXX) $< -o $@ $(CXXFLAGS) $(LDFLAGS) -ggdb3
 
 ecilop-c: ecilop.cc
-	$(CXX) -o $@ $(CXXFLAGS) $(LDFLAGS) -fprofile-arcs -ftest-coverage $<
+	$(CXX) $< -o $@ $(CXXFLAGS) $(LDFLAGS) -fprofile-arcs -ftest-coverage
 
 test: ecilop
 	./test.py
