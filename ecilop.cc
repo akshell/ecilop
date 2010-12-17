@@ -176,8 +176,9 @@ Worker::Worker(const string& dev_name,
         return;
     }
     string lock_path(locks_path + '/' + dev_name);
-    int lock_fd = open(lock_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    int lock_fd = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0600);
     ASSERT(lock_fd != -1);
+    SetCloseOnExec(lock_fd);
     ret = flock(lock_fd, LOCK_SH);
     ASSERT(ret == 0);
     string dev_path(data_path + "/devs/" + dev_name);
