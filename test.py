@@ -28,11 +28,12 @@ LOCKS_PATH = TMP_PATH + '/locks'
 LOG_PATH = TMP_PATH + '/log'
 ECILOP_CONFIG_PATH = TMP_PATH + '/ecilop.conf'
 PATSAK_CONFIG_PATH = TMP_PATH + '/patsak.conf'
-CURR_PATH = os.path.dirname(__file__)
-ECILOP_PATH = CURR_PATH + '/' + ECILOP_CMD
-PATSAK_PATH = CURR_PATH + '/../patsak/exe/common/patsak'
-LIB_PATH = CURR_PATH + '/../patsak/lib'
-INIT_PATH = CURR_PATH + '/../patsak/init.sql'
+ECILOP_PATH = os.path.dirname(__file__)
+ECILOP_EXE_PATH = ECILOP_PATH + '/' + ECILOP_CMD
+PATSAK_PATH = ECILOP_PATH + '/../patsak'
+PATSAK_EXE_PATH = PATSAK_PATH + '/exe/common/patsak'
+PATSAK_LIB_PATH = PATSAK_PATH + '/lib'
+PATSAK_SQL_PATH = PATSAK_PATH + '/patsak.sql'
 SPACE_COUNT = 128
 
 
@@ -55,7 +56,7 @@ def popen(cmd):
 
 
 def launch(args):
-    return popen([ECILOP_PATH, '--config', ECILOP_CONFIG_PATH] + args)
+    return popen([ECILOP_EXE_PATH, '--config', ECILOP_CONFIG_PATH] + args)
 
 
 def talk(data):
@@ -84,7 +85,7 @@ class Test(unittest.TestCase):
         popen(['dropdb', DB_NAME]).wait()
         popen(['createdb', DB_NAME]).wait()
         conn = psycopg2.connect('dbname=' + DB_NAME)
-        conn.cursor().execute(read_file(INIT_PATH) + '''
+        conn.cursor().execute(read_file(PATSAK_SQL_PATH) + '''
 SELECT ak.create_schema('ecilop:echo');
 SELECT ak.create_schema('ecilop:echo:debug');
 ''')
@@ -131,7 +132,7 @@ exports.handle = function (socket) {
         write_file(PATSAK_CONFIG_PATH, '''\
 db=dbname=%s
 lib=%s
-''' % (DB_NAME, os.path.abspath(LIB_PATH)))
+''' % (DB_NAME, os.path.abspath(PATSAK_LIB_PATH)))
         write_file(ECILOP_CONFIG_PATH, '''\
 data=%s
 locks=%s
@@ -140,14 +141,15 @@ patsak=%s
 patsak-config=%s
 port=%d
 timeout=1
-''' % (DATA_PATH, LOCKS_PATH, LOG_PATH, PATSAK_PATH, PATSAK_CONFIG_PATH, PORT))
+''' % (DATA_PATH, LOCKS_PATH, LOG_PATH, PATSAK_EXE_PATH, PATSAK_CONFIG_PATH,
+       PORT))
 
     def tearDown(self):
         popen(['killall', ECILOP_CMD])
         shutil.rmtree(TMP_PATH)
 
     def test(self):
-        self.assertEqual(popen([ECILOP_PATH]).wait(), 1)
+        self.assertEqual(popen([ECILOP_EXE_PATH]).wait(), 1)
         self.assertEqual(launch(['--bad']).wait(), 1)
         self.assertEqual(launch(['--help']).wait(), 0)
         self.assertEqual(launch(['--socket', 'bad/socket']).wait(), 1)
