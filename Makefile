@@ -1,4 +1,4 @@
-# (c) 2010 by Anton Korenyushkin
+# (c) 2010-2011 by Anton Korenyushkin
 
 CXXFLAGS=-pedantic -Wall -Wextra -Werror
 LDFLAGS=-lboost_program_options-mt
