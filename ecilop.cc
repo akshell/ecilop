@@ -214,7 +214,7 @@ Worker::Worker(const string& dev_name,
         "--log-id", schema_name.c_str(),
         "--git", common_git_path_pattern.c_str(),
         "--git", grantor_git_path_pattern.c_str(),
-        0, 0, 0, 0, 0
+        0, 0, 0, 0, 0, 0, 0
     };
     size_t i = 14;
     string repo_name;
@@ -225,7 +225,11 @@ Worker::Worker(const string& dev_name,
     }
     if (!patsak_config_path.empty()) {
         args[i++] = "--config";
-        args[i] = patsak_config_path.c_str();
+        args[i++] = patsak_config_path.c_str();
+    }
+    if (app_name == "kupishoes") {
+        args[i++] = "--timeout";
+        args[i++] = "300";
     }
     execv(patsak_path.c_str(), const_cast<char**>(args));
     Fail("Failed to launch patsak");
