@@ -229,7 +229,7 @@ Worker::Worker(const string& dev_name,
     }
     if (app_name == "kupishoes") {
         args[i++] = "--timeout";
-        args[i++] = "300";
+        args[i++] = "3600";
     }
     execv(patsak_path.c_str(), const_cast<char**>(args));
     Fail("Failed to launch patsak");
