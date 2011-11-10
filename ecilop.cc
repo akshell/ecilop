@@ -227,7 +227,7 @@ Worker::Worker(const string& dev_name,
         args[i++] = "--config";
         args[i++] = patsak_config_path.c_str();
     }
-    if (app_name == "kupishoes") {
+    if (app_name == "kupishoes" || app_name.find("comstor") != string::npos) {
         args[i++] = "--timeout";
         args[i++] = "10000";
     }
